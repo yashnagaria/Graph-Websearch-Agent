@@ -1,90 +1,58 @@
+# Graph Websearch Agent
 
-# Custom WebSearch Agent with LangGraph
+A custom web search and graph execution toolkit for flexible query workflows. This project includes search integration, model selection support, and local server scripts for Windows and Linux.
 
-### Watch the Tutorial:
-[![Watch this video on YouTube](https://img.youtube.com/vi/R-o_a6dvzQM/0.jpg)](https://www.youtube.com/watch?v=R-o_a6dvzQM)
+## Prerequisites
 
-### Agent Schema:
-![Agent Schema](schema_diagram/LanGraph.png)
+- Python 3.11 or later
+- Conda or a compatible virtual environment tool
+- Required Python packages from `requirements.txt`
 
-### Prerequisites
+## Environment Setup
 
-#### Environment Setup
-1. **Install Anaconda:**  
-   Download Anaconda from [https://www.anaconda.com/](https://www.anaconda.com/).
-
-2. **Create a Virtual Environment:**
+1. Create a new virtual environment:
    ```bash
    conda create -n agent_env python=3.11 pip
    ```
-   
-3. **Activate the Virtual Environment:**
+
+2. Activate the environment:
    ```bash
    conda activate agent_env
    ```
 
-### Clone and Navigate to the Repository
-1. **Clone the Repo:**
-   ```bash
-   git clone https://github.com/john-adeojo/graph_websearch_agent.git
-   ```
-
-2. **Navigate to the Repo:**
-   ```bash
-   cd /path/to/your-repo/graph_websearch_agent
-   ```
-
-3. **Install Requirements:**
+3. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-### Configure API Keys
-1. **Open the `config.yaml`:**
-   ```bash
-   nano config.yaml
-   ```
+## Configure the Project
 
-2. **Enter API Keys:**
-   - **Serper API Key:** Get it from [https://serper.dev/](https://serper.dev/)
-   - **OpenAI API Key:** Get it from [https://openai.com/](https://openai.com/)
-   - **Gemini API Key:** Get it from [https://ai.google.dev/gemini-api](https://ai.google.dev/gemini-api)
-   - **Claude API Key:** Get it from [https://docs.anthropic.com/en/api/getting-started](https://docs.anthropic.com/en/api/getting-started)
-   - **Groq API Key:** Get it from [https://console.groq.com/keys](https://console.groq.com/keys)
+1. Open `config/config.yaml` in a text editor.
+2. Provide the required search and model keys in the config file.
+3. Save the updated configuration.
 
-### Run the front end
-If you want to run the front end
+## Run the Project
 
-For Windows, run:
-```powershell
-run_windows.ps1
-```
+- On Windows:
+  ```powershell
+  .\run_windows.ps1
+  ```
 
-For Linux/macOS, run:
-```bash
-chmod +x run_linux.sh
-run_linux.sh
-```
+- On Linux/macOS:
+  ```bash
+  chmod +x run_linux.sh
+  ./run_linux.sh
+  ```
 
-### Run Your Query In Shell
+## Run in Shell
+
+To start the agent directly from the command line:
 ```bash
 python -m app.app
 ```
-Then enter your query.
+Then enter your query when prompted.
 
-## If you want to work with Ollama
+## Notes
 
-### Setup Ollama Server
-1. **Download Ollama:**
-   Download [https://ollama.com/download](https://ollama.com/download)
-
-2. **Download an Ollama Model:**
-   ```bash
-   curl http://localhost:11434/api/pull -d "{\"name\": \"llama3\"}"
-   ```
-Ollama [API documentation](https://github.com/ollama/ollama/blob/main/docs/api.md#list-local-models)
-
-#### Video on how I integrated the Ollama Server:
-
-[![Watch the video](https://img.youtube.com/vi/tVcOU054iWA/0.jpg)](https://youtu.be/tVcOU054iWA)
-
+- This repository is intended for local experimentation and development.
+- The nested project root contains the complete source tree and setup scripts.
