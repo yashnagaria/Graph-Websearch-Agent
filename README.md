@@ -56,3 +56,4 @@ Then enter your query when prompted.
 
 - This repository is intended for local experimentation and development.
 - The nested project root contains the complete source tree and setup scripts.
+\n## Additional Documentation\n\nSee docs/INDEX.md for quick links to setup, configuration, and runtime instructions.\n
