@@ -1,0 +1,30 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-wheel-metadata/
+build/
+dist/
+*.egg-info/
+*.egg
+# Editor files
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+.DS_Store
+# Logs
+*.log
+# Jupyter
+.ipynb_checkpoints/
+# Windows
+Thumbs.db
+# Other
+*.sqlite3
