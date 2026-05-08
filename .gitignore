@@ -28,3 +28,4 @@ Thumbs.db
 Thumbs.db
 # Other
 *.sqlite3
+\n# Local environment files\n.env\n.env.*\n*.sqlite3\n.pytest_cache/\npip-selfcheck.json\n
