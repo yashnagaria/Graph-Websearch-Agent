@@ -1,87 +1,70 @@
-import requests
+"""Ollama clients - a local model server, so no API key is involved.
+
+The endpoint defaults to the standard local daemon but can be pointed elsewhere with
+``OLLAMA_BASE_URL``, which is what lets a hosted app talk to a tunnelled local Ollama.
+Timeouts are generous because local models on CPU are slow to first token.
+"""
+
 import json
-import ast
+import os
+
 from langchain_core.messages.human import HumanMessage
 
-class OllamaJSONModel:
-    def __init__(self, temperature=0, model="llama3:instruct"):
-        self.headers = {"Content-Type": "application/json"}
-        self.model_endpoint = "http://localhost:11434/api/generate"
+from models._common import as_error, parse_json_payload, post_json
+
+DEFAULT_BASE_URL = "http://localhost:11434"
+DEFAULT_MODEL = "llama3:instruct"
+OLLAMA_TIMEOUT = 600
+
+
+def _base_url():
+    return (os.environ.get("OLLAMA_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+
+
+class _BaseOllamaModel:
+    def __init__(self, temperature=0, model=DEFAULT_MODEL, model_endpoint=None):
         self.temperature = temperature
-        self.model = model
+        self.model = model or DEFAULT_MODEL
+        self.headers = {"Content-Type": "application/json"}
+        base = (model_endpoint or _base_url()).rstrip("/")
+        self.model_endpoint = base if base.endswith("/api/generate") else f"{base}/api/generate"
 
-    def invoke(self, messages):
-
+    def _request(self, messages, json_mode):
         system = messages[0]["content"]
         user = messages[1]["content"]
 
         payload = {
-                "model": self.model,
-                "prompt": user,
-                "format": "json",
-                "system": system,
-                "stream": False,
-                "temperature": 0,
-            }
-        
-        try:
-            request_response = requests.post(
-                self.model_endpoint, 
-                headers=self.headers, 
-                data=json.dumps(payload)
-                )
-            
-            print("REQUEST RESPONSE", request_response)
-            request_response_json = request_response.json()
-            # print("REQUEST RESPONSE JSON", request_response_json)
-            response = json.loads(request_response_json['response'])
-            response = json.dumps(response)
+            "model": self.model,
+            "prompt": user,
+            "system": system,
+            "stream": False,
+            "options": {"temperature": self.temperature},
+        }
+        if json_mode:
+            payload["format"] = "json"
 
-            response_formatted = HumanMessage(content=response)
+        data = post_json(
+            self.model_endpoint, self.headers, payload, "Ollama", timeout=OLLAMA_TIMEOUT
+        )
 
-            return response_formatted
-        except requests.RequestException as e:
-            response = {"error": f"Error in invoking model! {str(e)}"}
-            response_formatted = HumanMessage(content=response)
-            return response_formatted
+        text = (data.get("response") or "").strip()
+        if not text:
+            raise ValueError("Ollama returned an empty response")
+        return text
 
-class OllamaModel:
-    def __init__(self, temperature=0, model="llama3:instruct"):
-        self.headers = {"Content-Type": "application/json"}
-        self.model_endpoint = "http://localhost:11434/api/generate"
-        self.temperature = temperature
-        self.model = model
 
+class OllamaJSONModel(_BaseOllamaModel):
     def invoke(self, messages):
-
-        system = messages[0]["content"]
-        user = messages[1]["content"]
-
-        payload = {
-                "model": self.model,
-                "prompt": user,
-                "system": system,
-                "stream": False,
-                "temperature": 0,
-            }
-        
         try:
-            request_response = requests.post(
-                self.model_endpoint, 
-                headers=self.headers, 
-                data=json.dumps(payload)
-                )
-            
-            print("REQUEST RESPONSE JSON", request_response)
+            text = self._request(messages, json_mode=True)
+            return HumanMessage(content=json.dumps(parse_json_payload(text)))
+        except Exception as e:
+            return as_error(e)
 
-            request_response_json = request_response.json()['response']
-            response = str(request_response_json)
-            
-            response_formatted = HumanMessage(content=response)
 
-            return response_formatted
-        except requests.RequestException as e:
-            response = {"error": f"Error in invoking model! {str(e)}"}
-            response_formatted = HumanMessage(content=response)
-            return response_formatted
-
+class OllamaModel(_BaseOllamaModel):
+    def invoke(self, messages):
+        try:
+            return HumanMessage(content=self._request(messages, json_mode=False))
+        except Exception as e:
+            return as_error(e)

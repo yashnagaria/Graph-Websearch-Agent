@@ -545,6 +545,22 @@ it. Retrying four times with backoff *inside* the model client is far cheaper th
 graph absorb the failure — and the UI now collects those error payloads separately so one can never
 be rendered as the final report.
 
+**"A client never raises" was only true of one client.** The architecture depends on every model
+client swallowing its own failures into an `{"error": ...}` payload, so a dead API degrades into the
+reviewer critiquing an error string rather than a stack trace. I had made that true of Gemini and
+then written it down as a design principle — but the Groq, Ollama and vLLM text clients still did
+`response.json()['choices'][0]['message']['content']` behind `except requests.RequestException`, so
+any unexpected response shape threw a `KeyError` straight through the graph. Running Groq with a
+retired model id proved it: the planner reported a handled error, and then the reporter died with
+`The workflow stopped: 'choices'`. Their error paths were broken too — they passed a `dict` to
+`HumanMessage(content=...)`, which is itself a crash.
+
+Worse, the message was useless. Groq had replied `400` with *"The model `llama3-70b-8192` has been
+decommissioned"*, and the code discarded that in favour of "No choices in response". The fix was to
+pull the shared plumbing into `models/_common.py` — retries, the provider's own error text, fenced
+JSON parsing — and route all five REST clients through it, each catching `Exception` rather than a
+hopeful subset. The principle is now enforced in one place instead of being asserted in six.
+
 **A hardcoded path to somebody's Google Drive.** `app/chat.py` pointed at
 `G:/My Drive/Data-Centric Solutions/…`. It ran on exactly one machine on Earth. Now it resolves
 relative to the file.

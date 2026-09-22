@@ -30,7 +30,7 @@ st.set_page_config(
 PROVIDER_DEFAULT_MODELS = {
     "gemini": "gemini-3.6-flash",
     "openai": "gpt-4o-mini",
-    "groq": "llama3-70b-8192",
+    "groq": "llama-3.3-70b-versatile",
     "claude": "claude-3-5-sonnet-20240620",
     "ollama": "llama3:instruct",
     "vllm": "meta-llama/Meta-Llama-3-70B-Instruct",
@@ -44,6 +44,16 @@ GEMINI_MODELS = [
     "gemini-3-flash-preview",
     "gemini-3.1-flash-lite",
 ]
+# Groq retires ids aggressively too - llama3-70b-8192 and llama3-8b-8192 are both gone
+# and the API answers with an explicit "has been decommissioned" message.
+# Current list: https://console.groq.com/docs/models
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "openai/gpt-oss-120b",
+]
+
+MODEL_CHOICES = {"gemini": GEMINI_MODELS, "groq": GROQ_MODELS}
 CUSTOM_MODEL = "Custom…"
 
 PROVIDER_KEY_ENV = {
@@ -223,12 +233,13 @@ with st.sidebar:
         help="Gemini works with a free key from Google AI Studio.",
     )
 
-    if server == "gemini":
+    if server in MODEL_CHOICES:
         choice = st.selectbox(
             "Model",
-            GEMINI_MODELS + [CUSTOM_MODEL],
+            MODEL_CHOICES[server] + [CUSTOM_MODEL],
             index=0,
-            help="Verified against a live AI Studio key. Older ids like gemini-2.0-flash are retired.",
+            help="Providers retire model ids without notice. If one stops working the error "
+                 "message will say so by name — pick another here.",
         )
         model = (
             st.text_input("Custom model id", value=PROVIDER_DEFAULT_MODELS[server])
@@ -237,6 +248,15 @@ with st.sidebar:
         )
     else:
         model = st.text_input("Model name", value=PROVIDER_DEFAULT_MODELS[server])
+
+    ollama_base_url = ""
+    if server == "ollama":
+        ollama_base_url = st.text_input(
+            "Ollama server URL",
+            value=secret("OLLAMA_BASE_URL") or "http://localhost:11434",
+            help="Leave as localhost when running the app on the same machine as Ollama. "
+                 "A deployed app cannot reach your localhost — point this at a tunnel instead.",
+        )
 
     model_endpoint = None
     stop_token = None
@@ -355,6 +375,7 @@ if run:
         "CLAUD_API_KEY": provider_key if server == "claude" else secret("CLAUD_API_KEY"),
         "SERPER_API_KEY": serper_key,
         "SEARCH_PROVIDER": search_provider,
+        "OLLAMA_BASE_URL": ollama_base_url,
     })
 
     trace_area = st.container()

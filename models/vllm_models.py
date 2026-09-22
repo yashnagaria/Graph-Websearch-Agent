@@ -1,137 +1,86 @@
-import requests
+"""vLLM clients - a self-hosted OpenAI-compatible server.
+
+``model_endpoint`` is the server root (e.g. ``https://my-host/``); the chat-completions
+path is appended here. MistralAI builds do not take a separate system turn, so the two
+messages are merged for that prefix.
+"""
+
 import json
+
 from langchain_core.messages.human import HumanMessage
 
-class VllmJSONModel:
-    def __init__(self, temperature=0, model="llama3:instruct", model_endpoint=None, guided_json=None, stop=None):
+from models._common import (
+    as_error,
+    openai_choice_text,
+    parse_json_payload,
+    post_json,
+)
+
+VLLM_TIMEOUT = 300
+
+
+def _endpoint(model_endpoint):
+    if not model_endpoint:
+        raise ValueError("No vLLM endpoint was provided. Set it in the sidebar.")
+    base = model_endpoint.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/v1/chat/completions"
+
+
+class _BaseVllmModel:
+    def __init__(self, temperature=0, model=None, model_endpoint=None, guided_json=None, stop=None):
         self.headers = {"Content-Type": "application/json"}
-        self.model_endpoint = model_endpoint + 'v1/chat/completions'
+        self.raw_endpoint = model_endpoint
         self.temperature = temperature
         self.model = model
         self.guided_json = guided_json
         self.stop = stop
 
-    def invoke(self, messages):
+    def _messages_payload(self, system, user, json_mode):
+        prefix = (self.model or "").split("/")[0]
 
-        system = messages[0]["content"]
-        user = messages[1]["content"]
-
-        prefix = self.model.split('/')[0]
-
-        # MistralAI model does not require system and user prefix
+        # MistralAI builds reject a separate system turn.
         if prefix == "mistralai":
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": f"system:{system}\n\n user:{user}"
-                    }
-                ],
-                "temperature": 0,
-                "stop": None,
-                "guided_json": self.guided_json
-            }
+            messages = [{"role": "user", "content": f"system:{system}\n\n user:{user}"}]
         else:
-            payload = {
-                "model": self.model,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system
-                    },
-                    {
-                        "role": "user",
-                        "content": user
-                    }
-                ],
-                "temperature": 0,
-                "stop": self.stop,
-                "guided_json": self.guided_json
-            }
-        
-        try:
-            request_response = requests.post(
-                self.model_endpoint, 
-                headers=self.headers, 
-                data=json.dumps(payload)
-                )
-            
-            print("REQUEST RESPONSE", request_response)
-            request_response_json = request_response.json()
-            # print("REQUEST RESPONSE JSON", request_response_json)
-            response = json.loads(request_response_json['choices'][0]['message']['content'])
-            response = json.dumps(response)
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
 
-            response_formatted = HumanMessage(content=response)
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "stop": self.stop,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+            if self.guided_json:
+                payload["guided_json"] = self.guided_json
+        return payload
 
-            return response_formatted
-        except requests.RequestException as e:
-            response = {"error": f"Error in invoking model! {str(e)}"}
-            response_formatted = HumanMessage(content=response)
-            return response_formatted
+    def _request(self, messages, json_mode):
+        payload = self._messages_payload(messages[0]["content"], messages[1]["content"], json_mode)
+        data = post_json(
+            _endpoint(self.raw_endpoint), self.headers, payload, "vLLM", timeout=VLLM_TIMEOUT
+        )
+        return openai_choice_text(data, "vLLM")
 
-class VllmModel:
-    def __init__(self, temperature=0, model="llama3:instruct", model_endpoint=None, stop=None):
-        self.headers = {"Content-Type": "application/json"}
-        self.model_endpoint = model_endpoint + 'v1/chat/completions'
-        self.temperature = temperature
-        self.model = model
-        self.stop = stop
 
+class VllmJSONModel(_BaseVllmModel):
     def invoke(self, messages):
-
-        system = messages[0]["content"]
-        user = messages[1]["content"]
-
-        prefix = self.model.split('/')[0]
-
-        # MistralAI model does not require system and user prefix
-        if prefix == "mistralai":
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": f"system:{system}\n\n user:{user}"
-                    }
-                ],
-                "temperature": 0,
-                "stop": None,
-            }
-        else:
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system
-                    },
-                    {
-                        "role": "user",
-                        "content": user
-                    }
-                ],
-                "temperature": 0,
-                "stop": self.stop,
-            }
-        
         try:
-            request_response = requests.post(
-                self.model_endpoint, 
-                headers=self.headers, 
-                data=json.dumps(payload)
-                )
-            
-            print("REQUEST RESPONSE", request_response)
-            request_response_json = request_response.json()['choices'][0]['message']['content']
-            response = str(request_response_json)
-            
-            response_formatted = HumanMessage(content=response)
+            text = self._request(messages, json_mode=True)
+            return HumanMessage(content=json.dumps(parse_json_payload(text)))
+        except Exception as e:
+            return as_error(e)
 
-            return response_formatted
-        except requests.RequestException as e:
-            response = {"error": f"Error in invoking model! {str(e)}"}
-            response_formatted = HumanMessage(content=response)
-            return response_formatted
+
+class VllmModel(_BaseVllmModel):
+    def invoke(self, messages):
+        try:
+            return HumanMessage(content=self._request(messages, json_mode=False))
+        except Exception as e:
+            return as_error(e)
