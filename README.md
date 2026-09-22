@@ -137,7 +137,7 @@ back to DuckDuckGo automatically rather than crashing the run.
 
 | Provider | Default model | Key needed |
 |---|---|---|
-| `gemini` | `gemini-2.0-flash` | `GEMINI_API_KEY` |
+| `gemini` | `gemini-3.6-flash` | `GEMINI_API_KEY` |
 | `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` |
 | `groq` | `llama3-70b-8192` | `GROQ_API_KEY` |
 | `claude` | `claude-3-5-sonnet-20240620` | `CLAUD_API_KEY` |
@@ -189,6 +189,9 @@ config/config.yaml      Optional local key file
 | Workflow ends with no report | Raise the recursion limit in the sidebar, or rephrase the question. |
 | `error in scraping website, 403 Forbidden` | Normal — the site blocks bots. The router sends the selector back to pick a different page. |
 | Search returns nothing | DuckDuckGo rate-limits busy shared IPs. Add a free Serper key for reliable results. |
+| `503 This model is currently experiencing high demand` | Free-tier load. Every call already retries 4× with backoff; if it persists, pick another model in the sidebar or wait a few minutes. |
+| `429 You exceeded your current quota` | Free-tier daily/per-minute quota is used up. Wait, or enable billing on the Google Cloud project behind the key. |
+| `404 This model is no longer available to new users` | Google retired that model id. Pick one from the sidebar dropdown — `gemini-2.0-flash` and `gemini-2.5-flash` are both already retired. |
 | Build fails on Streamlit Cloud | Set the Python version to **3.11** in the app's advanced settings. |
 
 ---

@@ -138,6 +138,21 @@ provider at runtime: use Serper if a key exists, fall back to DuckDuckGo (no sig
 does not — and fall back again if a Serper call fails mid-run. **One free Gemini key is now enough
 to run the entire system.**
 
+**Two of the three documented model ids were dead.** The code defaulted to
+`gemini-2.0-flash`. Against a freshly issued AI Studio key it returns *404: no longer available to
+new users*. So did `gemini-2.5-flash`. Worse, both still appear in the `ListModels` response — the
+catalogue endpoint lists models the key cannot actually call, so you only find out by sending a
+real request. The fix was to probe every candidate with a live call, default to a verified id, and
+replace the free-text model box with a dropdown of ids that were actually confirmed to work.
+
+**Free-tier Gemini fails a lot, and each failure cost a whole agent turn.** Under load the API
+returns `503 high demand` frequently. Because every agent swallows its own errors into an
+`{"error": ...}` payload, a single 503 propagated: the reporter "wrote" an error string, the
+reviewer earnestly critiqued that error string, and the router burned a loop rerouting because of
+it. Retrying four times with backoff *inside* the model client is far cheaper than letting the
+graph absorb the failure — and the UI now collects those error payloads separately so one can never
+be rendered as the final report.
+
 **A hardcoded path to somebody's Google Drive.** `app/chat.py` pointed at
 `G:/My Drive/Data-Centric Solutions/…`. It ran on exactly one machine on Earth. Now it resolves
 relative to the file.
@@ -202,78 +217,77 @@ behind a login or a hard paywall.
 
 ## 7. A worked example, end to end
 
+This is a **real run**, not an idealised one — the trace below is what the graph actually did on
+`gemini-3.6-flash` with DuckDuckGo search and no Serper key. It took 145 seconds and 14 steps.
+
 **Question:** *"What are the headline features of Python 3.13?"*
 
-**Step 1 — 🧠 Planner.** Reads the question and returns:
+**[1] 🧠 Planner.** Rewrote the casual question into something a release-notes page would match:
 
 ```json
 {
-  "search_term": "Python 3.13 new features release notes",
-  "overall_strategy": "Target the official python.org 'What's New' document rather than blog summaries, which often repeat each other and get details wrong.",
-  "additional_information": "Fallback terms: 'What's New In Python 3.13', 'PEP 703 free-threading'"
+  "search_term": "Python 3.13 headline features whats new",
+  "overall_strategy": "Search for official Python 3.13 release notes and technical summaries
+                       to identify the major headline features…"
 }
 ```
 
-Note what happened: the user's casual phrasing became a query with the words a release-notes page
-actually contains.
+**[2] 🔎 Search.** DuckDuckGo, no API key, 4558 characters of results.
 
-**Step 2 — 🔎 Search.** The term goes to Serper, or to DuckDuckGo if no key is set. Ten results come
-back as `Title / Link / Snippet` triples.
-
-**Step 3 — 🎯 Selector.** Reads all ten and commits to one:
+**[3] 🎯 Selector.** Out of ten results it chose the primary source over the blog posts:
 
 ```json
 {
   "selected_page_url": "https://docs.python.org/3/whatsnew/3.13.html",
-  "description": "The official What's New in Python 3.13 document.",
-  "reason_for_selection": "Primary source, maintained by CPython core developers, complete rather than a summary."
+  "description": "Official Python documentation outlining all major new features…"
 }
 ```
 
-It passed over higher-ranked blog posts in favour of the primary source. That preference is written
-into the selector's system prompt.
+**[4] 📄 Scraper.** Fetched it with a browser user agent and stripped it to text.
 
-**Step 4 — 📄 Scraper.** Fetches the page with a browser user agent, strips the HTML to text, caps
-it, and stores `{"source": "https://docs.python.org/...", "content": "..."}`.
+**[5] ✍️ Reporter — failed.** Gemini returned `503 high demand`. The agent swallowed it into an
+`{"error": ...}` payload rather than throwing.
 
-**Step 5 — ✍️ Reporter.** Sees *only* the scraped text and the question, and drafts:
+**[6] ⚖️ Reviewer.** Read that payload and — correctly — refused it:
 
-> **Python 3.13 — headline features**
-> - A new interactive interpreter (REPL) with multiline editing, colour output and block history.
-> - **Free-threaded mode (PEP 703):** an experimental build that runs without the GIL.
-> - **Experimental JIT compiler (PEP 744).**
-> - Substantially improved error messages…
+> *"The reporter response failed due to an API execution error. Please regenerate the report
+> providing a summary of Python 3.13 headline features…"*
+
+**[7] 🧭 Router.** `{"next_agent": "reporter"}` — **the conditional edge fired and sent work
+backwards.** This is the whole thesis of the architecture, triggered by a real failure rather than
+a contrived one.
+
+**[8] ✍️ Reporter — succeeded.** With the source still in state, it produced:
+
+> * **Improved Interactive Interpreter** — a greatly improved REPL [1]
+> * **Experimental Free-Threaded CPython** — runs with the GIL disabled (PEP 703) [1]
+> * **Experimental JIT Compiler** (PEP 744) [1]
+> * **Improved Error Messages** — tracebacks coloured by default [1]
+> * **Defined Semantics for `locals()`** (PEP 667) [1]
+> * **Type Parameter Defaults**, mobile platform support, and removal of the "dead batteries" (PEP 594) [1]
 >
-> *Source: https://docs.python.org/3/whatsnew/3.13.html*
+> *Sources: [1] https://docs.python.org/3/whatsnew/3.13.html*
 
-**Step 6 — ⚖️ Reviewer.** Grades the draft against the question, not against its own reasoning. A
-typical first-pass critique:
+Every claim carries a citation, because the reporter only ever saw that one page.
 
-> *"The free-threading and JIT entries do not state that both are experimental opt-in builds, which
-> a reader would reasonably misinterpret as defaults. Recommend the reporter revise."*
+**[9–11]** The reviewer hit a 503 of its own, the router again routed back to the reporter, and the
+reporter reproduced an equivalent report.
 
-**Step 7 — 🧭 Router.** Turns that critique into a routing decision:
+**[12] ⚖️ Reviewer — approved.**
 
-```json
-{"next_agent": "reporter"}
-```
+> *"The report accurately and comprehensively summarizes the headline features of Python 3.13…"*
 
-The conditional edge fires and control goes **back** to the reporter — not to the planner, because
-the source was right and only the write-up was wrong. The reporter revises with the critique in its
-context, the reviewer reads it again, and this time the router returns:
+**[13] 🧭 Router — failed, and the graph survived it.** Another 503. Before this was fixed,
+`review_data["next_agent"]` raised a `KeyError` that killed the entire run and discarded twelve
+steps of completed work. Now an unreadable routing decision ends the graph cleanly and the caller
+keeps the last good draft.
 
-```json
-{"next_agent": "final_report"}
-```
+**[14] 🏁 End.** The approved report is returned and rendered with a download button, above the
+full expandable trace.
 
-**Step 8 — ✅ Final report.** The approved draft is written to `final_reports`, the graph reaches
-`end`, and the Streamlit page renders it with a download button — above a full, expandable trace of
-all eight steps.
-
-**Total:** roughly 7–9 LLM calls, one search, one page fetched, one self-correction. The
-self-correction is the part a straight-line RAG chain can never do.
-
----
+**What this run demonstrates:** the loop rerouted twice, recovered from three separate upstream API
+failures, never crashed, and still produced a correct, cited answer. A straight-line RAG chain hits
+the 503 at step 5 and returns an error to the user.
 
 ## 8. What I would build next
 

@@ -12,6 +12,7 @@ Both hit the REST endpoint directly (no extra SDK dependency) and always return 
 
 import os
 import json
+import time
 import requests
 from langchain_core.messages.human import HumanMessage
 
@@ -19,7 +20,14 @@ from utils.helper_functions import load_config
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 REQUEST_TIMEOUT = 120
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-3.6-flash"
+
+# Free-tier Gemini returns 503 "high demand" fairly often. A failed call costs a whole
+# agent turn - the reviewer critiques an error string, the router reroutes for nothing -
+# so it is much cheaper to wait and retry here than to let the graph absorb it.
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 4
+BACKOFF_SECONDS = (2, 5, 12)
 
 
 def _extract_text(response_json):
@@ -91,20 +99,40 @@ class _BaseGeminiModel:
             "generationConfig": self._generation_config(json_mode),
         }
 
-        response = requests.post(
-            self.model_endpoint,
-            headers=self.headers,
-            data=json.dumps(payload),
-            timeout=REQUEST_TIMEOUT,
-        )
-        print("REQUEST RESPONSE", response.status_code)
+        last_error = None
+        for attempt in range(MAX_ATTEMPTS):
+            if attempt:
+                time.sleep(BACKOFF_SECONDS[min(attempt - 1, len(BACKOFF_SECONDS) - 1)])
 
-        try:
-            response_json = response.json()
-        except json.JSONDecodeError:
-            raise ValueError(f"Gemini returned a non-JSON response ({response.status_code}): {response.text[:300]}")
+            try:
+                response = requests.post(
+                    self.model_endpoint,
+                    headers=self.headers,
+                    data=json.dumps(payload),
+                    timeout=REQUEST_TIMEOUT,
+                )
+            except requests.RequestException as network_error:
+                last_error = network_error
+                print(f"REQUEST FAILED ({network_error}); attempt {attempt + 1}/{MAX_ATTEMPTS}")
+                continue
 
-        return _extract_text(response_json)
+            print("REQUEST RESPONSE", response.status_code)
+
+            if response.status_code in RETRY_STATUSES:
+                last_error = ValueError(f"Gemini returned {response.status_code}: {response.text[:200]}")
+                print(f"Transient {response.status_code}; attempt {attempt + 1}/{MAX_ATTEMPTS}")
+                continue
+
+            try:
+                response_json = response.json()
+            except json.JSONDecodeError:
+                raise ValueError(
+                    f"Gemini returned a non-JSON response ({response.status_code}): {response.text[:300]}"
+                )
+
+            return _extract_text(response_json)
+
+        raise ValueError(f"Gemini is unavailable after {MAX_ATTEMPTS} attempts. Last error: {last_error}")
 
 
 class GeminiJSONModel(_BaseGeminiModel):
@@ -120,6 +148,9 @@ class GeminiJSONModel(_BaseGeminiModel):
         try:
             text = self._post(prompt_text, json_mode=True)
             parsed = json.loads(_strip_code_fence(text))
+            # Some models satisfy the JSON mime type with a single-element array.
+            if isinstance(parsed, list):
+                parsed = next((item for item in parsed if isinstance(item, dict)), {})
             return HumanMessage(content=json.dumps(parsed))
         except (requests.RequestException, ValueError, KeyError, json.JSONDecodeError) as e:
             error_message = f"Error in invoking model! {str(e)}"

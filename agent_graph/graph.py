@@ -165,23 +165,41 @@ def create_graph(server=None, model=None, stop=None, model_endpoint=None, temper
     graph.add_node("end", lambda state: EndNodeAgent(state).invoke())
 
     # Define the edges in the agent graph
-    def pass_review(state: AgentGraphState):
-        review_list = state["router_response"]
-        if review_list:
-            review = review_list[-1]
-        else:
-            review = "No review"
+    valid_next_agents = {"planner", "selector", "reporter", "final_report", "end"}
 
-        if review != "No review":
-            if isinstance(review, HumanMessage):
-                review_content = review.content
-            else:
-                review_content = review
-            
+    def pass_review(state: AgentGraphState):
+        """Read the router's decision and return the next node name.
+
+        The router is an LLM, so its output can be malformed, an error payload from a
+        failed API call, or a node name that does not exist. Any of those used to raise
+        and kill the whole run mid-flight, losing the work already done. Anything we
+        cannot understand now ends the graph cleanly instead - the caller still has the
+        last draft the reporter produced.
+        """
+        review_list = state["router_response"]
+        if not review_list:
+            return "end"
+
+        review = review_list[-1]
+        review_content = review.content if isinstance(review, HumanMessage) else review
+
+        try:
             review_data = json.loads(review_content)
-            next_agent = review_data["next_agent"]
-        else:
-            next_agent = "end"
+        except (json.JSONDecodeError, TypeError):
+            print(f"Router returned unparsable output, ending run: {str(review_content)[:200]}")
+            return "end"
+
+        if not isinstance(review_data, dict) or "next_agent" not in review_data:
+            print(f"Router returned no next_agent, ending run: {str(review_content)[:200]}")
+            return "end"
+
+        next_agent = review_data["next_agent"]
+        if isinstance(next_agent, list):
+            next_agent = next_agent[-1] if next_agent else "end"
+
+        if next_agent not in valid_next_agents:
+            print(f"Router named an unknown agent {next_agent!r}, ending run.")
+            return "end"
 
         return next_agent
 

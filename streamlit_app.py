@@ -28,13 +28,23 @@ st.set_page_config(
 )
 
 PROVIDER_DEFAULT_MODELS = {
-    "gemini": "gemini-2.0-flash",
+    "gemini": "gemini-3.6-flash",
     "openai": "gpt-4o-mini",
     "groq": "llama3-70b-8192",
     "claude": "claude-3-5-sonnet-20240620",
     "ollama": "llama3:instruct",
     "vllm": "meta-llama/Meta-Llama-3-70B-Instruct",
 }
+
+# Google retires model ids without much notice - gemini-2.0-flash and gemini-2.5-flash
+# are both already refused for new keys. These were verified against a live AI Studio key.
+GEMINI_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite",
+]
+CUSTOM_MODEL = "Custom…"
 
 PROVIDER_KEY_ENV = {
     "gemini": "GEMINI_API_KEY",
@@ -111,6 +121,14 @@ def try_json(text):
         return json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return None
+
+
+def error_in(text):
+    """Agents swallow API failures and return {"error": ...}. Return that message, if any."""
+    data = try_json(text)
+    if isinstance(data, dict) and "error" in data:
+        return str(data["error"])
+    return None
 
 
 def render_planner(container, text):
@@ -205,7 +223,20 @@ with st.sidebar:
         help="Gemini works with a free key from Google AI Studio.",
     )
 
-    model = st.text_input("Model name", value=PROVIDER_DEFAULT_MODELS[server])
+    if server == "gemini":
+        choice = st.selectbox(
+            "Model",
+            GEMINI_MODELS + [CUSTOM_MODEL],
+            index=0,
+            help="Verified against a live AI Studio key. Older ids like gemini-2.0-flash are retired.",
+        )
+        model = (
+            st.text_input("Custom model id", value=PROVIDER_DEFAULT_MODELS[server])
+            if choice == CUSTOM_MODEL
+            else choice
+        )
+    else:
+        model = st.text_input("Model name", value=PROVIDER_DEFAULT_MODELS[server])
 
     model_endpoint = None
     stop_token = None
@@ -330,6 +361,7 @@ if run:
     step = 0
     final_report = ""
     last_report = ""
+    errors = []
 
     try:
         with st.spinner("Compiling the agent graph…"):
@@ -351,10 +383,21 @@ if run:
                 if node == "end":
                     continue
 
+                # An agent that hit an API failure returns an {"error": ...} payload.
+                # Collect those, and never let one end up rendered as the report.
+                for key in (f"{node}_response", "final_reports", "scraper_response"):
+                    message = error_in(latest(update, key))
+                    if message and message not in errors:
+                        errors.append(message)
+
                 if node == "reporter":
-                    last_report = latest(update, "reporter_response") or last_report
+                    text = latest(update, "reporter_response")
+                    if text and not error_in(text):
+                        last_report = text
                 if node == "final_report":
-                    final_report = latest(update, "final_reports") or last_report
+                    text = latest(update, "final_reports")
+                    if text and not error_in(text):
+                        final_report = text
 
                 if not show_trace:
                     continue
@@ -388,6 +431,15 @@ if run:
 
     report = final_report or last_report
     st.divider()
+
+    if errors:
+        with st.expander(f"⚠️ {len(errors)} agent call(s) failed during this run", expanded=not report):
+            for message in errors:
+                st.warning(message)
+            st.caption(
+                "Free-tier Gemini returns 503/429 under load. Each call already retries with "
+                "backoff — if these persist, wait a minute or switch model in the sidebar."
+            )
 
     if report:
         st.subheader("📋 Final report")

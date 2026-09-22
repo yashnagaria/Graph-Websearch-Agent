@@ -130,10 +130,18 @@ def _search_duckduckgo_html(query):
 
 
 def search_duckduckgo(query):
-    """DuckDuckGo search with no API key. Tries the package first, then raw HTML."""
-    results = _search_duckduckgo_package(query)
-    if results:
-        return results
+    """DuckDuckGo search with no API key. Tries the package first, then raw HTML.
+
+    The ``ddgs`` package fans out across several upstream engines and raises when one
+    of them times out, so an exception here is routine rather than fatal.
+    """
+    try:
+        results = _search_duckduckgo_package(query)
+        if results:
+            return results
+    except Exception as package_error:
+        print(f"ddgs search failed ({package_error}); falling back to the HTML endpoint.")
+
     return _search_duckduckgo_html(query)
 
 
