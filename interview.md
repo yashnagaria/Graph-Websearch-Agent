@@ -106,7 +106,265 @@ does not propose the same failed search term twice.
 
 ---
 
-## 4. The parts that fought back
+## 4. The architecture in detail
+
+### 4.1 The layers
+
+The system is six layers deep, and the important property is that **no layer above knows which
+model provider sits underneath it**. Every model client, whether it is talking to Gemini over REST
+or to a local Ollama daemon, returns the same `HumanMessage` object.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  PRESENTATION    streamlit_app.py            app/app.py (CLI)        │
+│                  app/chat.py (Chainlit)                              │
+│                  all three consume workflow.stream(...)              │
+├──────────────────────────────────────────────────────────────────────┤
+│  ORCHESTRATION   agent_graph/graph.py                                │
+│                  StateGraph: 9 nodes, 7 fixed edges,                 │
+│                  1 conditional edge, 1 entry + 1 finish point        │
+├──────────────────────────────────────────────────────────────────────┤
+│  AGENTS          agents/agents.py                                    │
+│                  Agent base class + 7 subclasses                     │
+├──────────────────────────────────────────────────────────────────────┤
+│  CONTRACTS       prompts/prompts.py        states/state.py           │
+│                  system prompts +          the shared state schema   │
+│                  JSON output schemas       and its accessors         │
+├──────────────────────────────────────────────────────────────────────┤
+│  CAPABILITY      models/*.py               tools/*.py                │
+│                  6 provider clients        search + scraper          │
+├──────────────────────────────────────────────────────────────────────┤
+│  CONFIG          utils/helper_functions.py     config/config.yaml    │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Swapping Gemini for Groq changes one dropdown value. Nothing in the graph, the agents or the
+prompts is aware it happened.
+
+### 4.2 The state object
+
+Everything flows through one `TypedDict` in [`states/state.py`](states/state.py). There is no
+message passing between agents — they communicate only by reading and writing this shared object.
+
+| Field | Type | Written by | Read by |
+|---|---|---|---|
+| `research_question` | `str` | the caller, once | every agent |
+| `planner_response` | append-only list | planner | search tool |
+| `serper_response` | append-only list | search tool | selector |
+| `selector_response` | append-only list | selector | scraper tool |
+| `scraper_response` | append-only list | scraper tool | reporter |
+| `reporter_response` | append-only list | reporter | reviewer, final report |
+| `reviewer_response` | append-only list | reviewer | router, planner, selector, reporter |
+| `router_response` | append-only list | router | the conditional edge |
+| `final_reports` | append-only list | final report node | the caller |
+| `end_chain` | append-only list | end node | nothing — it is a terminator |
+
+Every field except the question carries LangGraph's `add_messages` reducer:
+
+```python
+planner_response: Annotated[list, add_messages]
+```
+
+**Append, never overwrite.** This is the single most important decision in the data model. When the
+router sends work back to the planner on the third iteration, the planner can see its own two
+previous attempts *and* every critique the reviewer has written. That is what stops it proposing
+the same failed search term twice — the loop has memory, so it is iterative rather than merely
+repetitive.
+
+There is a subtlety worth knowing if you read the agent code. Every agent ends with:
+
+```python
+def update_state(self, key, value):
+    self.state = {**self.state, key: value}   # returns the ENTIRE state
+```
+
+So each node hands the whole state back to LangGraph, not just the field it changed — which looks
+like it should duplicate every message on every step. It does not, because `add_messages` assigns a
+UUID to each message and merges by that id: messages already in the state are recognised and
+replaced in place, while the one genuinely new value (a raw `str`) is converted to a `HumanMessage`
+with a fresh id and appended. Only the changed field grows.
+
+`get_agent_graph_state(state, key)` is the read side, and it is deliberately dumb: `"..._all"`
+returns the whole history, `"..._latest"` returns `[-1]`. Agents that need context ask for `_all`;
+agents that need the current artefact ask for `_latest`.
+
+### 4.3 Node contracts
+
+Nine nodes. Seven call an LLM or a tool; two are bookkeeping.
+
+| Node | Reads | Produces | LLM mode |
+|---|---|---|---|
+| `planner` | question, `reviewer_latest` | `{search_term, overall_strategy, additional_information}` | JSON |
+| `serper_tool` | `planner_latest` | formatted SERP text | none — HTTP |
+| `selector` | question, SERP, `selector_all`, `reviewer_latest` | `{selected_page_url, description, reason_for_selection}` | JSON |
+| `scraper_tool` | `selector_latest` | `{source, content}` capped at 4000 chars | none — HTTP |
+| `reporter` | question, scraped page, `reporter_all`, `reviewer_latest` | Markdown report | **free text** |
+| `reviewer` | question, `reporter_latest`, `reviewer_all`, full state | structured critique | JSON |
+| `router` | question, `reviewer_all` | `{next_agent}` | JSON |
+| `final_report` | `reporter_latest` | promotes the draft to `final_reports` | none |
+| `end` | — | writes `end_chain`, terminates | none |
+
+The reporter is the **only** agent that runs in free-text mode
+(`self.get_llm(json_model=False)`). Everything else is forced through
+`response_mime_type: application/json` with a declared schema in
+[`prompts/prompts.py`](prompts/prompts.py). That asymmetry is deliberate: prose is the product,
+and every other output is a control signal that something downstream has to parse.
+
+### 4.4 Control flow
+
+```
+        set_entry_point("planner")
+                    │
+   ┌────────────────▼─────────────────────────────────────────┐
+   │  planner ──► serper_tool ──► selector ──► scraper_tool    │   7 fixed edges:
+   │                                              │           │   a straight pipeline
+   │       reporter ◄─────────────────────────────┘           │
+   │          │                                               │
+   │          ▼                                               │
+   │      reviewer ──► router                                 │
+   └──────────────────────┬───────────────────────────────────┘
+                          │  add_conditional_edges  ← the only branch
+         ┌────────────┬───┴────────┬───────────────┐
+         ▼            ▼            ▼               ▼
+      planner     selector     reporter      final_report ──► end ──► END
+     (bad term)  (bad page)  (bad write-up)    (approved)
+```
+
+Every edge except one is hardcoded. The loop exists entirely because of:
+
+```python
+graph.add_conditional_edges("router", lambda state: pass_review(state=state))
+```
+
+`pass_review` reads the last `router_response`, parses its JSON, and returns a node name as a
+string. LangGraph resolves that string to the next node. Return `"planner"` and the whole pipeline
+re-runs with a new search term; return `"reporter"` and only the write-up is redone against the
+page already in state.
+
+**Three ways a run terminates**, which matters because an agent loop that cannot stop is a billing
+incident:
+
+1. **Success** — the router returns `final_report`, which promotes the draft and flows to `end`.
+2. **Recursion limit** — `{"recursion_limit": 40}` caps total node executions. LangGraph raises
+   once it is exceeded.
+3. **The fail-safe** — anything `pass_review` cannot understand (unparsable JSON, a missing
+   `next_agent`, an unknown node name) returns `"end"`. This is what makes a transient API error
+   cost you one run instead of an exception, and it is a change I made only after watching a `503`
+   throw a `KeyError` out of the conditional edge and discard twelve completed steps.
+
+### 4.5 The provider abstraction
+
+`Agent.get_llm()` is the whole of it — a dispatch table from a provider string to a client pair:
+
+```python
+def get_llm(self, json_model=True):
+    if self.server == 'gemini':
+        return GeminiJSONModel(...) if json_model else GeminiModel(...)
+    if self.server == 'openai':
+        return get_open_ai_json(...) if json_model else get_open_ai(...)
+    # groq, claude, ollama, vllm follow the same shape
+```
+
+Every provider ships exactly two classes — a JSON one and a text one — and both expose a single
+method, `invoke(messages) -> HumanMessage`. `messages` is always a two-element list, a system turn
+and a user turn.
+
+The contract is not just the signature. **A client never raises.** Every model client catches its
+own exceptions and returns `HumanMessage(content='{"error": "..."}')`. That is why a dead API
+degrades into a reviewer politely critiquing an error string rather than a stack trace, and it is
+why the Streamlit layer has to check for `{"error": ...}` payloads explicitly before treating any
+text as a report.
+
+Only the OpenAI client is a LangChain wrapper. The other five are ~60 lines of `requests` each,
+which is why the repo has no provider SDKs to keep in sync.
+
+### 4.6 The tool layer
+
+**Search** resolves a provider at call time rather than at import, so a key pasted into the sidebar
+mid-session takes effect immediately. It degrades down a ladder:
+
+```
+SEARCH_PROVIDER=auto
+   └─ SERPER_API_KEY present?  ──yes──► Serper  ──fails──┐
+              │ no                                       │
+              └───────────────────────────────────────►  DuckDuckGo via `ddgs`
+                                                              │ raises / empty
+                                                              ▼
+                                                   DuckDuckGo HTML endpoint
+```
+
+Each rung needs no configuration from the one above it, so the system has no hard dependency on any
+paid service.
+
+**The scraper** fetches exactly one URL with a browser user agent and a 20-second timeout, flattens
+the HTML with BeautifulSoup's `stripped_strings`, rejects the result if more than 30% of characters
+are non-ASCII (a cheap and surprisingly effective binary-garbage detector), and truncates to 4000
+characters. A 403 or a timeout is written into state as scraper *output*, not raised — so the
+reviewer sees an empty source and the router reroutes.
+
+### 4.7 Configuration resolution
+
+One function, `load_config`, called at the top of every model and tool module:
+
+```
+environment variables  ─────►  already set and non-empty?  ─── keep them
+                                          │ no
+                                          ▼
+                               config/config.yaml value, if non-empty
+                                          │ no
+                                          ▼
+                                       unset
+```
+
+Environment always wins. On Streamlit Cloud the keys arrive from `st.secrets`, get pushed into
+`os.environ` before the graph is built, and the empty committed YAML never touches them. Getting
+this precedence backwards is what silently broke the first cloud deploy.
+
+### 4.8 Execution and streaming
+
+`workflow.stream(inputs, {"recursion_limit": n})` is a generator yielding one dict per completed
+node, shaped `{node_name: state_update}`. The Streamlit layer renders each as it arrives, which is
+why the UI shows the agents working rather than a spinner.
+
+Two things about that stream are easy to get wrong. It yields the node's **return value**, not the
+reduced state — so the field a node just wrote is still a raw `str`, while every other field holds
+the `HumanMessage` list it was handed. And because the agents are synchronous, the run occupies the
+Streamlit script thread for its whole duration; the Chainlit UI wraps it in `cl.make_async` for the
+same reason.
+
+### 4.9 The failure model
+
+The design assumption is that **every external call fails sometimes**, so each failure has a
+defined destination rather than a traceback.
+
+| Failure | Where it is caught | What happens |
+|---|---|---|
+| LLM 503 / 429 / network | model client | 4 retries with 2s/5s/12s backoff |
+| LLM still failing after retries | model client | returns `{"error": ...}`; the run continues |
+| LLM returns fenced or array JSON | `GeminiJSONModel` | fence stripped, first dict extracted |
+| LLM returns no text at all | `_extract_text` | raises with `finishReason` named |
+| Serper down or out of quota | `run_search` | falls through to DuckDuckGo |
+| `ddgs` backend times out | `search_duckduckgo` | falls through to the HTML endpoint |
+| Page returns 403 / times out | `scrape_website` | written to state as content; router reroutes |
+| Page is binary garbage | `is_garbled` | replaced with an error string; router reroutes |
+| Router emits unparsable JSON | `pass_review` | graph ends cleanly, last draft preserved |
+| Loop will not converge | LangGraph | recursion limit stops it |
+| Anything else | `streamlit_app.py` | error plus traceback rendered in the page |
+
+### 4.10 What a single question costs
+
+A clean run with no retries is **7 LLM calls** — planner, selector, reporter, reviewer, router, then
+final report — plus one search request and one page fetch. Each reviewer rejection adds three more
+calls (reporter, reviewer, router). The observed run in §8 took 145 seconds and 14 node executions
+across two reroutes.
+
+The expensive input is the scraped page at 4000 characters; the reviewer is second, because it is
+handed the entire state object in its prompt. Both are worth knowing before raising the recursion
+limit much above 40.
+
+---
+
+## 5. The parts that fought back
 
 An honest build log is more useful than a highlight reel. These are the things that actually broke.
 
@@ -159,7 +417,7 @@ relative to the file.
 
 ---
 
-## 5. From terminal to a URL anyone can open
+## 6. From terminal to a URL anyone can open
 
 The original interface was `input()` in a terminal with `termcolor` output. That is a fine way to
 debug an agent and a terrible way to show one to anybody else.
@@ -181,7 +439,7 @@ the sidebar so the app is usable by someone who has never seen the repo.
 
 ---
 
-## 6. What it is good for
+## 7. What it is good for
 
 ### Use case A — Time-sensitive factual lookup
 
@@ -215,7 +473,7 @@ behind a login or a hard paywall.
 
 ---
 
-## 7. A worked example, end to end
+## 8. A worked example, end to end
 
 This is a **real run**, not an idealised one — the trace below is what the graph actually did on
 `gemini-3.6-flash` with DuckDuckGo search and no Serper key. It took 145 seconds and 14 steps.
@@ -289,7 +547,7 @@ full expandable trace.
 failures, never crashed, and still produced a correct, cited answer. A straight-line RAG chain hits
 the 503 at step 5 and returns an error to the user.
 
-## 8. What I would build next
+## 9. What I would build next
 
 - **Parallel selectors.** Read the top three sources concurrently and let the reporter cross-check
   them. LangGraph supports fan-out; the state reducers are already append-only, so the shape is
@@ -303,7 +561,7 @@ the 503 at step 5 and returns an error to the user.
 
 ---
 
-## 9. The one-paragraph version
+## 10. The one-paragraph version
 
 *I built a web research agent as a LangGraph state machine rather than a RAG chain, because
 research needs to be able to go back. Five agents — planner, selector, reporter, reviewer, router —

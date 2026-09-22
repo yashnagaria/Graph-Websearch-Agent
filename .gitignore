@@ -40,3 +40,6 @@ pip-selfcheck.json
 
 # Chainlit
 .files/
+
+# Build artefacts
+build/
