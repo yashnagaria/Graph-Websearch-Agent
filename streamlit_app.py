@@ -340,17 +340,11 @@ with st.sidebar:
     temperature = st.slider("Temperature", 0.0, 1.0, 0.0, 0.05)
     recursion_limit = st.number_input(
         "Recursion limit",
-        min_value=1,
+        min_value=5,
         max_value=100,
-        value=2,
-        step=1,
-        help="Maximum node executions before LangGraph stops the run. A clean pass needs "
-             "about 9 (planner, search, selector, scraper, reporter, reviewer, router, "
-             "final report, end), and each reviewer rejection adds 3 more.",
-    )
-    st.caption(
-        "A full pass = **9 steps / 5 LLM calls**. Each reviewer rejection adds 3 steps "
-        "(3 more calls). Below 9, the run stops before producing a report."
+        value=40,
+        step=5,
+        help="Maximum agent steps before the workflow stops itself.",
     )
     show_trace = st.toggle("Show live agent trace", value=True)
 
@@ -428,7 +422,6 @@ if run:
     final_report = ""
     last_report = ""
     errors = []
-    stopped_early = False
 
     try:
         with st.spinner("Compiling the agent graph…"):
@@ -491,21 +484,10 @@ if run:
         progress.update(label=f"Done in {step} steps", state="complete", expanded=False)
 
     except Exception as error:  # surface the failure in the UI instead of a blank page
-        # Running out of recursion budget is an expected outcome when the limit is set
-        # low to save API calls, so keep whatever the reporter already wrote rather than
-        # throwing the whole run away.
-        if "recursion" in str(error).lower():
-            stopped_early = True
-            progress.update(
-                label=f"Stopped at the recursion limit after {step} steps",
-                state="complete",
-                expanded=False,
-            )
-        else:
-            st.error(f"The workflow stopped: {error}")
-            with st.expander("Traceback"):
-                st.code(traceback.format_exc())
-            st.stop()
+        st.error(f"The workflow stopped: {error}")
+        with st.expander("Traceback"):
+            st.code(traceback.format_exc())
+        st.stop()
 
     report = final_report or last_report
     st.divider()
@@ -521,12 +503,6 @@ if run:
 
     if report:
         st.subheader("📋 Final report")
-        if stopped_early and not final_report:
-            st.info(
-                f"Recursion limit ({int(recursion_limit)}) reached before the reviewer approved "
-                "this draft — it is the reporter's latest output, shown as-is. Raise the limit "
-                "for a reviewed answer."
-            )
         st.markdown(report)
         st.download_button(
             "⬇️ Download report (Markdown)",
@@ -536,7 +512,6 @@ if run:
         )
     else:
         st.warning(
-            f"No report was produced. The recursion limit is {int(recursion_limit)}; a full pass "
-            "needs 9 steps (5 of them LLM calls), so the run stopped before the reporter wrote "
-            "anything. Raise the limit to at least 9."
+            "The workflow finished without an approved report. Try raising the recursion limit, "
+            "or rephrasing the question."
         )

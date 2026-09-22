@@ -37,9 +37,9 @@ def update_config(serper_api_key, openai_llm_api_key, groq_llm_api_key, claud_ll
 class ChatWorkflow:
     def __init__(self):
         self.workflow = None
-        self.recursion_limit = 2
+        self.recursion_limit = 40
 
-    def build_workflow(self, server, model, model_endpoint, temperature, recursion_limit=2, stop=None):
+    def build_workflow(self, server, model, model_endpoint, temperature, recursion_limit=40, stop=None):
         graph = create_graph(
             server=server, 
             model=model, 
@@ -104,8 +104,8 @@ async def start():
             NumberInput(
                 id="recursion_limit",
                 label="Enter the recursion limit:",
-                description="The maximum number of agent actions the workflow will take before stopping. The default value is 2",
-                initial=2
+                description="The maximum number of agent actions the workflow will take before stopping. The default value is 40",
+                initial=40
             ),
             TextInput(
                 id="google_serper_api_key",

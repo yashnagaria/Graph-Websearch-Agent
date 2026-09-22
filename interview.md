@@ -487,9 +487,8 @@ defined destination rather than a traceback.
 
 ### 4.10 What a single question costs
 
-A clean run with no retries is **5 LLM calls** — planner, selector, reporter, reviewer, router —
-plus one search request and one page fetch. The `final_report` and `end` nodes call no model at all,
-so a full pass costs 9 node executions but only 5 requests. Each reviewer rejection adds three more
+A clean run with no retries is **7 LLM calls** — planner, selector, reporter, reviewer, router, then
+final report — plus one search request and one page fetch. Each reviewer rejection adds three more
 calls (reporter, reviewer, router). The observed run in §9 took 145 seconds and 14 node executions
 across two reroutes.
 
