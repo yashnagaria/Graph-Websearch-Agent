@@ -106,7 +106,141 @@ does not propose the same failed search term twice.
 
 ---
 
-## 4. The architecture in detail
+## 4. The nodes, in plain English
+
+Before the detailed architecture, here is the whole system explained from scratch — no LangGraph
+vocabulary required.
+
+Think of it as a **six-person research team sharing one notebook**. Nobody on the team talks to
+anybody else. They only write in the notebook and read what the others wrote. A supervisor decides
+who works next.
+
+| # | Node | In plain English | Uses AI? | File |
+|---|---|---|---|---|
+| 1 | `planner` | Decides *what to google* | yes — JSON | [`agents.py`](agents/agents.py) |
+| 2 | `serper_tool` | Actually googles it | no | [`tools/google_serper.py`](tools/google_serper.py) |
+| 3 | `selector` | Picks **one** link worth reading | yes — JSON | [`agents.py`](agents/agents.py) |
+| 4 | `scraper_tool` | Opens that link, copies the text | no | [`tools/basic_scraper.py`](tools/basic_scraper.py) |
+| 5 | `reporter` | Writes the answer | yes — free text | [`agents.py`](agents/agents.py) |
+| 6 | `reviewer` | Marks the answer, finds faults | yes — JSON | [`agents.py`](agents/agents.py) |
+| 7 | `router` | Decides: ship it, or send it back | yes — JSON | [`agents.py`](agents/agents.py) |
+| 8 | `final_report` | Stamps it "approved" | no | [`agents.py`](agents/agents.py) |
+| 9 | `end` | Stops the machine | no | [`agents.py`](agents/agents.py) |
+
+### 1. `planner` — the strategist
+
+| | |
+|---|---|
+| **Job** | You asked a casual question. A search engine needs a *good query*. This turns one into the other. |
+| **Reads** | Your question, plus the reviewer's last complaint (empty on the first pass) |
+| **Produces** | `{"search_term", "overall_strategy", "additional_information"}` |
+| **Real example** | *"What are the headline features of Python 3.13?"* becomes `"Python 3.13 headline features whats new"` |
+| **Why it exists** | If the search term is wrong, everything downstream is wrong. That is worth a dedicated agent. |
+| **If it fails** | Returns an `{"error": ...}` payload, and the search node finds no term to use |
+
+### 2. `serper_tool` — the search box
+
+| | |
+|---|---|
+| **Job** | Send the planner's term to a search engine and bring back ten results |
+| **Reads** | The planner's latest output |
+| **Produces** | Plain text: `Title / Link / Snippet`, ten times |
+| **No AI** | It is an HTTP request and nothing more |
+| **The clever bit** | Tries Serper (needs a key), then DuckDuckGo via the `ddgs` package, then DuckDuckGo's plain HTML page. **It works with no API key at all.** |
+
+### 3. `selector` — the librarian
+
+| | |
+|---|---|
+| **Job** | Read all ten results and commit to **exactly one** |
+| **Reads** | The ten results, which pages it has already tried, and the reviewer's complaint |
+| **Produces** | `{"selected_page_url", "description", "reason_for_selection"}` |
+| **Real example** | Skipped the higher-ranked blog posts and chose `docs.python.org/3/whatsnew/3.13.html` |
+| **Why only one?** | So every claim in the final answer traces back to one link you can open and check yourself |
+
+### 4. `scraper_tool` — the photocopier
+
+| | |
+|---|---|
+| **Job** | Open that one URL and strip it down to readable text |
+| **Reads** | The selector's latest output |
+| **Produces** | `{"source": url, "content": the first 4000 characters}` |
+| **No AI** | `requests` plus BeautifulSoup |
+| **Guards** | A browser user agent (many sites reject Python's default), a 20-second timeout, and a check that rejects the page if more than 30% of its characters are non-ASCII — cheap binary-junk detection |
+| **If it fails** | The error is saved *as the content*. Nothing crashes: the reviewer sees an empty source and the loop goes back to pick a different page. |
+
+### 5. `reporter` — the writer
+
+| | |
+|---|---|
+| **Job** | Write the actual answer |
+| **Reads** | Your question, the scraped page, its own earlier drafts, and the reviewer's complaint |
+| **Produces** | Markdown prose with a citation |
+| **What makes it special** | It is the **only node that does not use JSON mode**. Prose is the product here; every other output is a control signal for something downstream. |
+| **Important** | It sees *only* that one scraped page. It cannot fall back on the model's own memory, which is what stops it inventing facts. |
+
+### 6. `reviewer` — the examiner
+
+| | |
+|---|---|
+| **Job** | Grade the draft against your original question |
+| **Reads** | The draft, every past critique, and the entire shared state |
+| **Produces** | Written, structured feedback |
+| **Why not let the reporter check itself?** | A model grading its own answer inside the same conversation almost always says "looks good". A separate call with a different system prompt sees the draft as somebody else's work, and gets genuinely critical. |
+| **Cost note** | The most expensive call in the graph, because the whole state goes into its prompt |
+
+### 7. `router` — the supervisor
+
+| | |
+|---|---|
+| **Job** | Turn the critique into a single decision |
+| **Reads** | Only the reviewer's feedback — never the report itself |
+| **Produces** | `{"next_agent": "..."}`, one word |
+| **Why this node is the whole architecture** | Its answer literally becomes the next node to run. It is the only place in the system where the pipeline can turn backwards. |
+
+Its five possible answers:
+
+| Answer | Jumps to | Meaning |
+|---|---|---|
+| `planner` | node 1 | the search term was wrong — start over |
+| `selector` | node 3 | wrong page — try another from the same results |
+| `reporter` | node 5 | right page, bad write-up — rewrite only |
+| `final_report` | node 8 | approved |
+| `end` | node 9 | fail-safe: its own answer was unreadable |
+
+### 8. `final_report` — the rubber stamp
+
+| | |
+|---|---|
+| **Job** | Copy the approved draft into the `final_reports` field |
+| **No AI** | Pure bookkeeping; it writes nothing new |
+| **Why bother?** | It gives the user interface one unambiguous field meaning "this one is finished" |
+
+### 9. `end` — the off switch
+
+| | |
+|---|---|
+| **Job** | Write `end_chain` and terminate the graph |
+| **No AI** | Every possible path has to arrive here |
+
+### The three ways a run stops
+
+| | What happens |
+|---|---|
+| **Approved** | The router says `final_report`, which flows to `end` |
+| **Gave up** | 40 node executions are reached (the recursion limit) and LangGraph stops it |
+| **Fail-safe** | The router's answer is unreadable, so the graph ends cleanly and keeps the last good draft |
+
+### The one idea underneath all of it
+
+The nodes **never call each other**. Every arrow in every diagram in this document really means
+*write into the shared notebook, and let the next node read it* — and those writes **append rather
+than overwrite**. That is why the second lap is smarter than the first: the planner can see both its
+failed first attempt and the critique that killed it.
+
+---
+
+## 5. The architecture in detail
 
 ### 4.1 The layers
 
@@ -355,7 +489,7 @@ defined destination rather than a traceback.
 
 A clean run with no retries is **7 LLM calls** — planner, selector, reporter, reviewer, router, then
 final report — plus one search request and one page fetch. Each reviewer rejection adds three more
-calls (reporter, reviewer, router). The observed run in §8 took 145 seconds and 14 node executions
+calls (reporter, reviewer, router). The observed run in §9 took 145 seconds and 14 node executions
 across two reroutes.
 
 The expensive input is the scraped page at 4000 characters; the reviewer is second, because it is
@@ -364,7 +498,7 @@ limit much above 40.
 
 ---
 
-## 5. The parts that fought back
+## 6. The parts that fought back
 
 An honest build log is more useful than a highlight reel. These are the things that actually broke.
 
@@ -417,7 +551,7 @@ relative to the file.
 
 ---
 
-## 6. From terminal to a URL anyone can open
+## 7. From terminal to a URL anyone can open
 
 The original interface was `input()` in a terminal with `termcolor` output. That is a fine way to
 debug an agent and a terrible way to show one to anybody else.
@@ -439,7 +573,7 @@ the sidebar so the app is usable by someone who has never seen the repo.
 
 ---
 
-## 7. What it is good for
+## 8. What it is good for
 
 ### Use case A — Time-sensitive factual lookup
 
@@ -473,7 +607,7 @@ behind a login or a hard paywall.
 
 ---
 
-## 8. A worked example, end to end
+## 9. A worked example, end to end
 
 This is a **real run**, not an idealised one — the trace below is what the graph actually did on
 `gemini-3.6-flash` with DuckDuckGo search and no Serper key. It took 145 seconds and 14 steps.
@@ -547,7 +681,7 @@ full expandable trace.
 failures, never crashed, and still produced a correct, cited answer. A straight-line RAG chain hits
 the 503 at step 5 and returns an error to the user.
 
-## 9. What I would build next
+## 10. What I would build next
 
 - **Parallel selectors.** Read the top three sources concurrently and let the reporter cross-check
   them. LangGraph supports fan-out; the state reducers are already append-only, so the shape is
@@ -561,7 +695,7 @@ the 503 at step 5 and returns an error to the user.
 
 ---
 
-## 10. The one-paragraph version
+## 11. The one-paragraph version
 
 *I built a web research agent as a LangGraph state machine rather than a RAG chain, because
 research needs to be able to go back. Five agents — planner, selector, reporter, reviewer, router —

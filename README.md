@@ -11,7 +11,8 @@ It ships with a **Streamlit UI** that streams every agent hand-off to the page a
 you can watch the loop reason instead of staring at a spinner.
 
 > 📖 Curious how this was built and what it is good for? Read [`interview.md`](interview.md)
-> — it covers the design story, a **detailed architecture walkthrough**, use cases and a real
+> — it covers the design story, a **plain-English guide to every node**, a detailed architecture
+> walkthrough, use cases and a real
 > annotated run. Also available as a formatted PDF: [`interview.pdf`](interview.pdf)
 > (regenerate with `python scripts/build_interview_pdf.py`).
 
