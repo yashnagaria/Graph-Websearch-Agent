@@ -14,7 +14,7 @@ model_endpoint = None
 # #model_endpoint = runpod_endpoint + 'v1/chat/completions'
 # stop = "<|end_of_text|>"
 
-iterations = 40
+iterations = 2
 
 print ("Creating graph and compiling workflow...")
 graph = create_graph(server=server, model=model, model_endpoint=model_endpoint)
