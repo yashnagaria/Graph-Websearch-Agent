@@ -14,6 +14,7 @@ import ast
 import json
 import traceback
 
+import requests
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,30 @@ def secret(name, default=""):
         return st.secrets.get(name, default) or default
     except Exception:
         return default
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_groq_models(api_key):
+    """Ask Groq which models this key can actually use.
+
+    Free and paid tiers serve different model sets, and ids get retired without
+    notice, so a hardcoded list goes stale. Returns [] on any failure and the
+    caller falls back to the static list.
+    """
+    try:
+        response = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        ids = [entry.get("id", "") for entry in response.json().get("data", [])]
+    except Exception:
+        return []
+
+    # Drop the non-chat models: speech, safety classifiers, embeddings.
+    skip = ("whisper", "tts", "guard", "embed")
+    return sorted(i for i in ids if i and not any(word in i.lower() for word in skip))
 
 
 def apply_environment(keys):
@@ -233,19 +258,45 @@ with st.sidebar:
         help="Gemini works with a free key from Google AI Studio.",
     )
 
-    if server in MODEL_CHOICES:
+    # The key comes before the model picker so the model list can be fetched with it.
+    key_env = PROVIDER_KEY_ENV.get(server)
+    provider_key = ""
+    if key_env:
+        provider_key = st.text_input(
+            f"{server.title()} API key",
+            value=secret(key_env),
+            type="password",
+            help="Stored only for this session. On Streamlit Cloud, set it once under "
+                 "App settings → Secrets.",
+        )
+    else:
+        st.caption(f"`{server}` runs locally and needs no API key.")
+
+    live_models = fetch_groq_models(provider_key) if server == "groq" and provider_key else []
+    if live_models:
+        # Show the models we would have recommended first, then everything else the key allows.
+        preferred = [m for m in MODEL_CHOICES.get(server, []) if m in live_models]
+        options = preferred + [m for m in live_models if m not in preferred]
+    else:
+        options = MODEL_CHOICES.get(server, [])
+
+    if options:
         choice = st.selectbox(
             "Model",
-            MODEL_CHOICES[server] + [CUSTOM_MODEL],
+            options + [CUSTOM_MODEL],
             index=0,
-            help="Providers retire model ids without notice. If one stops working the error "
-                 "message will say so by name — pick another here.",
+            help="Providers retire model ids without notice. If one stops working, the error "
+                 "message names it — pick another here.",
         )
         model = (
             st.text_input("Custom model id", value=PROVIDER_DEFAULT_MODELS[server])
             if choice == CUSTOM_MODEL
             else choice
         )
+        if live_models:
+            st.caption(f"✅ {len(live_models)} chat models available to this key.")
+        elif server == "groq" and provider_key:
+            st.caption("⚠️ Could not list models from Groq — showing defaults.")
     else:
         model = st.text_input("Model name", value=PROVIDER_DEFAULT_MODELS[server])
 
@@ -265,19 +316,7 @@ with st.sidebar:
         stop_token = st.text_input("Stop token", value="<|end_of_text|>")
 
     st.divider()
-    st.subheader("🔑 API keys")
-
-    key_env = PROVIDER_KEY_ENV.get(server)
-    provider_key = ""
-    if key_env:
-        provider_key = st.text_input(
-            f"{server.title()} API key",
-            value=secret(key_env),
-            type="password",
-            help="Stored only for this session. On Streamlit Cloud, set it once under App settings → Secrets.",
-        )
-    else:
-        st.caption(f"`{server}` runs locally and needs no API key.")
+    st.subheader("🔎 Search")
 
     search_provider = st.selectbox(
         "Search provider",
