@@ -4,6 +4,16 @@ from bs4 import BeautifulSoup
 from states.state import AgentGraphState
 from langchain_core.messages import HumanMessage
 
+SCRAPER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+SCRAPER_TIMEOUT = 20
+
+
 def is_garbled(text):
     # A simple heuristic to detect garbled text: high proportion of non-ASCII characters
     non_ascii_count = sum(1 for char in text if ord(char) > 127)
@@ -20,7 +30,7 @@ def scrape_website(state: AgentGraphState, research=None):
         url = research_data["error"]
 
     try:
-        response = requests.get(url)
+        response = requests.get(url, headers=SCRAPER_HEADERS, timeout=SCRAPER_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         

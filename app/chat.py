@@ -7,7 +7,7 @@ from agent_graph.graph import create_graph, compile_workflow
 
 
 def update_config(serper_api_key, openai_llm_api_key, groq_llm_api_key, claud_llm_api_key, gemini_llm_api_key):
-    config_path = "G:/My Drive/Data-Centric Solutions/07. Digital Content/LangGraph/code/graph_websearch_agent/config/config.yaml"
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "config.yaml")
 
     with open(config_path, 'r') as file:
         config = yaml.safe_load(file)

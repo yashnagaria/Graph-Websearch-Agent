@@ -13,19 +13,30 @@ build/
 dist/
 *.egg-info/
 *.egg
+
 # Editor files
 .vscode/
 .idea/
 *.swp
 *~
-Thumbs.db
 .DS_Store
+Thumbs.db
+
 # Logs
 *.log
+
 # Jupyter
 .ipynb_checkpoints/
-# Windows
-Thumbs.db
-# Other
+
+# Local environment files
+.env
+.env.*
 *.sqlite3
-\n# Local environment files\n.env\n.env.*\n*.sqlite3\n.pytest_cache/\npip-selfcheck.json\n
+.pytest_cache/
+pip-selfcheck.json
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# Chainlit
+.files/

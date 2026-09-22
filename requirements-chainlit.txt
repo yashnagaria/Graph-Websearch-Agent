@@ -1,0 +1,4 @@
+# Optional: only needed for the original Chainlit UI (`chainlit run app/chat.py`).
+# Kept out of requirements.txt so the Streamlit Cloud build stays small and conflict-free.
+-r requirements.txt
+chainlit==1.1.202

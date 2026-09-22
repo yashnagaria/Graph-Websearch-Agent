@@ -1,8 +1,18 @@
-langchain-core==0.2.4
+# Runtime dependencies for the Streamlit app and the LangGraph workflow.
+# Tested on Python 3.11 (the version to pick in Streamlit Cloud's advanced settings).
+
+streamlit>=1.37.0
+
+# Agent graph
 langgraph==0.0.64
-langchain-community==0.2.3
+langchain-core==0.2.4
 langchain-openai==0.1.8
+
+# Tools and utilities
 beautifulsoup4==4.12.3
-# windows-curses==2.3.3
+requests>=2.31.0
+PyYAML>=6.0.1
 termcolor==2.4.0
-chainlit==1.1.202
+
+# Keyless web search fallback (used when no SERPER_API_KEY is set)
+ddgs>=9.0.0

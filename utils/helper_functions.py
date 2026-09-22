@@ -5,22 +5,26 @@ from textwrap import wrap
 
 
 # for loading configs to environment variables
+#
+# Precedence (highest first):
+#   1. Environment variables that are already set (Streamlit secrets, shell exports, CI)
+#   2. Non-empty values in config/config.yaml
+# An empty key in the yaml file never overwrites an env var that already has a value,
+# which is what lets the Streamlit app inject keys at runtime.
 def load_config(file_path):
-    # Define default values
-    default_values = {
-        'SERPER_API_KEY': 'default_serper_api_key',
-        'OPENAI_API_KEY': 'default_openai_api_key',
-        'SERPER_API_KEY': 'default_groq_api_key',
-    }
-    
+    if not os.path.exists(file_path):
+        return
+
     with open(file_path, 'r') as file:
-        config = yaml.safe_load(file)
-        for key, value in config.items():
-            # If the value is empty or None, load the default value
-            if not value:
-                os.environ[key] = default_values.get(key, '')
-            else:
-                os.environ[key] = value
+        config = yaml.safe_load(file) or {}
+
+    for key, value in config.items():
+        if os.environ.get(key):
+            # Already provided by the environment - leave it alone.
+            continue
+        if value:
+            os.environ[key] = str(value)
+
 # def load_config(file_path):
 #     with open(file_path, 'r') as file:
 #         config = yaml.safe_load(file)

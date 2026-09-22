@@ -1,245 +1,143 @@
-# import requests
-# import json
-# import os
-# from utils.helper_functions import load_config
-# from langchain_core.messages.human import HumanMessage
+"""Google Gemini (AI Studio) clients used by the agents.
 
-# class GeminiJSONModel:
-#     def __init__(self, temperature=0, model=None):
-#         config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.yaml')
-#         load_config(config_path)
-#         self.api_key = os.environ.get("GEMINI_API_KEY")
-#         self.headers = {
-#             'Content-Type': 'application/json'
-#         }
-#         self.model_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
-#         self.temperature = temperature
-#         self.model = model
+Two wrappers, matching the pattern the other providers follow:
 
-#     def invoke(self, messages):
-#         system = messages[0]["content"]
-#         user = messages[1]["content"]
+* :class:`GeminiJSONModel` - forces ``application/json`` output, used by the
+  planner, selector, reviewer and router, which all return structured JSON.
+* :class:`GeminiModel`     - free-form text, used by the reporter.
 
-#         payload = {
-#             "contents": [
-#                 {
-#                     "parts": [
-#                         {
-#                             "text": f"system:{system}. Your output must be JSON formatted. Just return the specified JSON format, do not prepend your response with anything.\n\nuser:{user}"
-#                         }
-#                     ]
-#                 }
-#             ],
-#             "generationConfig": {
-#                 "response_mime_type": "application/json"
-#             },
-#             "temperature": self.temperature
-#         }
+Both hit the REST endpoint directly (no extra SDK dependency) and always return a
+``HumanMessage`` so the rest of the graph can treat every provider the same way.
+"""
 
-#         try:
-#             request_response = requests.post(
-#                 self.model_endpoint, 
-#                 headers=self.headers, 
-#                 data=json.dumps(payload)
-#             )
-            
-#             print("REQUEST RESPONSE", request_response.status_code)
-            
-#             request_response_json = request_response.json()
-
-#             if 'contents' not in request_response_json or not request_response_json['contents']:
-#                 raise ValueError("No content in response")
-
-#             response_content = request_response_json['contents'][0]['parts'][0]['text']
-            
-#             response = json.loads(response_content)
-#             response = json.dumps(response)
-
-#             response_formatted = HumanMessage(content=response)
-
-#             return response_formatted
-#         except (requests.RequestException, ValueError, KeyError, json.JSONDecodeError) as e:
-#             error_message = f"Error in invoking model! {str(e)}"
-#             print("ERROR", error_message)
-#             response = {"error": error_message}
-#             response_formatted = HumanMessage(content=json.dumps(response))
-#             return response_formatted
-
-# class GeminiModel:
-#     def __init__(self, temperature=0, model=None):
-#         config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.yaml')
-#         load_config(config_path)
-#         self.api_key = os.environ.get("GEMINI_API_KEY")
-#         self.headers = {
-#             'Content-Type': 'application/json'
-#         }
-#         self.model_endpoint = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={self.api_key}"
-#         self.temperature = temperature
-#         self.model = model
-
-#     def invoke(self, messages):
-#         system = messages[0]["content"]
-#         user = messages[1]["content"]
-
-#         payload = {
-#             "contents": [
-#                 {
-#                     "parts": [
-#                         {
-#                             "text": f"system:{system}.\n\nuser:{user}"
-#                         }
-#                     ]
-#                 }
-#             ],
-#             "temperature": self.temperature
-#         }
-
-#         try:
-#             request_response = requests.post(
-#                 self.model_endpoint, 
-#                 headers=self.headers, 
-#                 data=json.dumps(payload)
-#             )
-            
-#             print("REQUEST RESPONSE", request_response.status_code)
-            
-#             request_response_json = request_response.json()
-
-#             if 'contents' not in request_response_json or not request_response_json['contents']:
-#                 raise ValueError("No content in response")
-
-#             response_content = request_response_json['contents'][0]['parts'][0]['text']
-#             response_formatted = HumanMessage(content=response_content)
-
-#             return response_formatted
-#         except (requests.RequestException, ValueError, KeyError, json.JSONDecodeError) as e:
-#             error_message = f"Error in invoking model! {str(e)}"
-#             print("ERROR", error_message)
-#             response = {"error": error_message}
-#             response_formatted = HumanMessage(content=json.dumps(response))
-#             return response_formatted
-
-import requests
-import json
 import os
-from utils.helper_functions import load_config
+import json
+import requests
 from langchain_core.messages.human import HumanMessage
 
-class GeminiJSONModel:
+from utils.helper_functions import load_config
+
+API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+REQUEST_TIMEOUT = 120
+DEFAULT_MODEL = "gemini-2.0-flash"
+
+
+def _extract_text(response_json):
+    """Pull the text out of a generateContent response, with a useful error if there is none."""
+    if "error" in response_json:
+        message = response_json["error"].get("message", "unknown error")
+        raise ValueError(f"Gemini API error: {message}")
+
+    candidates = response_json.get("candidates")
+    if not candidates:
+        feedback = response_json.get("promptFeedback", {})
+        blocked = feedback.get("blockReason")
+        if blocked:
+            raise ValueError(f"Gemini blocked the prompt: {blocked}")
+        raise ValueError("No candidates in Gemini response")
+
+    candidate = candidates[0]
+    parts = candidate.get("content", {}).get("parts") or []
+    text = "".join(part.get("text", "") for part in parts).strip()
+
+    if not text:
+        reason = candidate.get("finishReason", "unknown")
+        raise ValueError(f"Gemini returned no text (finishReason: {reason})")
+
+    return text
+
+
+def _strip_code_fence(text):
+    """Gemini occasionally wraps JSON in ```json fences even when asked not to."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    stripped = stripped.split("\n", 1)[-1] if "\n" in stripped else stripped
+    if stripped.rstrip().endswith("```"):
+        stripped = stripped.rstrip()[: -3]
+    return stripped.strip()
+
+
+class _BaseGeminiModel:
     def __init__(self, temperature=0, model=None):
         config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.yaml')
         load_config(config_path)
-        self.api_key = os.environ.get("GEMINI_API_KEY")
-        self.headers = {
-            'Content-Type': 'application/json'
-        }
-        self.model_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
-        self.temperature = temperature
-        self.model = model
 
+        self.api_key = os.environ.get("GEMINI_API_KEY", "")
+        self.model = model or DEFAULT_MODEL
+        self.temperature = temperature
+        self.headers = {'Content-Type': 'application/json'}
+        self.model_endpoint = f"{API_BASE}/{self.model}:generateContent?key={self.api_key}"
+
+    def _generation_config(self, json_mode):
+        config = {"temperature": self.temperature}
+        if json_mode:
+            config["response_mime_type"] = "application/json"
+
+        # 2.5 Flash reasons before answering by default, which burns the output budget
+        # on a task where the agents only need the answer. Turn it off where supported.
+        if "2.5-flash" in self.model:
+            config["thinkingConfig"] = {"thinkingBudget": 0}
+
+        return config
+
+    def _post(self, prompt_text, json_mode):
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY is not set. Add it in the sidebar or in Streamlit secrets.")
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt_text}]}],
+            "generationConfig": self._generation_config(json_mode),
+        }
+
+        response = requests.post(
+            self.model_endpoint,
+            headers=self.headers,
+            data=json.dumps(payload),
+            timeout=REQUEST_TIMEOUT,
+        )
+        print("REQUEST RESPONSE", response.status_code)
+
+        try:
+            response_json = response.json()
+        except json.JSONDecodeError:
+            raise ValueError(f"Gemini returned a non-JSON response ({response.status_code}): {response.text[:300]}")
+
+        return _extract_text(response_json)
+
+
+class GeminiJSONModel(_BaseGeminiModel):
     def invoke(self, messages):
         system = messages[0]["content"]
         user = messages[1]["content"]
 
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": f"system:{system}. Your output must be JSON formatted. Just return the specified JSON format, do not prepend your response with anything.\n\nuser:{user}"
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "response_mime_type": "application/json",
-                "temperature": self.temperature
-            },
-        }
+        prompt_text = (
+            f"system:{system}. Your output must be JSON formatted. Just return the specified "
+            f"JSON format, do not prepend your response with anything.\n\nuser:{user}"
+        )
 
         try:
-            request_response = requests.post(
-                self.model_endpoint, 
-                headers=self.headers, 
-                data=json.dumps(payload)
-            )
-            
-            print("REQUEST RESPONSE", request_response.status_code)
-            # print("\n\nREQUEST RESPONSE HEADERS", request_response.headers)
-            # print("\n\nREQUEST RESPONSE TEXT", request_response.text)
-            
-            request_response_json = request_response.json()
-
-            if 'candidates' not in request_response_json or not request_response_json['candidates']:
-                raise ValueError("No content in response")
-
-            response_content = request_response_json['candidates'][0]['content']['parts'][0]['text']
-            
-            response = json.loads(response_content)
-            response = json.dumps(response)
-
-            response_formatted = HumanMessage(content=response)
-
-            return response_formatted
+            text = self._post(prompt_text, json_mode=True)
+            parsed = json.loads(_strip_code_fence(text))
+            return HumanMessage(content=json.dumps(parsed))
         except (requests.RequestException, ValueError, KeyError, json.JSONDecodeError) as e:
             error_message = f"Error in invoking model! {str(e)}"
             print("ERROR", error_message)
-            response = {"error": error_message}
-            response_formatted = HumanMessage(content=json.dumps(response))
-            return response_formatted
+            return HumanMessage(content=json.dumps({"error": error_message}))
 
-class GeminiModel:
-    def __init__(self, temperature=0, model=None):
-        config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.yaml')
-        load_config(config_path)
-        self.api_key = os.environ.get("GEMINI_API_KEY")
-        self.headers = {
-            'Content-Type': 'application/json'
-        }
-        self.model_endpoint = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={self.api_key}"
-        self.temperature = temperature
-        self.model = model
 
+class GeminiModel(_BaseGeminiModel):
     def invoke(self, messages):
         system = messages[0]["content"]
         user = messages[1]["content"]
 
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": f"system:{system}\n\nuser:{user}"
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": self.temperature
-            },
-        }
+        prompt_text = f"system:{system}\n\nuser:{user}"
 
         try:
-            request_response = requests.post(
-                self.model_endpoint, 
-                headers=self.headers, 
-                data=json.dumps(payload)
-            )
-            
-            print("REQUEST RESPONSE", request_response.status_code)
-            
-            request_response_json = request_response.json()
-
-            if 'candidates' not in request_response_json or not request_response_json['candidates']:
-                raise ValueError("No content in response")
-
-            response_content = request_response_json['candidates'][0]['content']['parts'][0]['text']
-            response_formatted = HumanMessage(content=response_content)
-
-            return response_formatted
+            text = self._post(prompt_text, json_mode=False)
+            return HumanMessage(content=text)
         except (requests.RequestException, ValueError, KeyError, json.JSONDecodeError) as e:
             error_message = f"Error in invoking model! {str(e)}"
             print("ERROR", error_message)
-            response = {"error": error_message}
-            response_formatted = HumanMessage(content=json.dumps(response))
-            return response_formatted
+            return HumanMessage(content=json.dumps({"error": error_message}))
